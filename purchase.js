@@ -1,48 +1,94 @@
 (function(){
-  const BACKEND_URL = 'https://your-vercel-app.vercel.app/api/purchase'; // Change to your backend endpoint
-  const PIXEL_ID = '1265498695127046';
+  // ======= CONFIG =======
+  const BACKEND_URL = 'https://ogaviral-pixel.vercel.app/api/purchase'; // <-- your Vercel API
+  const REF_PARAM = 'reference';
 
-  function normPhone(raw){
-    if(!raw) return '';
-    let p = String(raw).replace(/[^\d+]/g,'');
-    if(p.startsWith('+')) return p;
-    if(p.startsWith('0')) return '+234' + p.slice(1);
-    if(p.startsWith('234')) return '+'+p;
-    if(/^\d{10,15}$/.test(p)) return '+'+p;
-    return p;
+  // ======= LOG (for quick debugging) =======
+  function log(){ try{ console.log.apply(console, ['[OGV purchase.js]'].concat([].slice.call(arguments))); }catch(_){} }
+
+  // ======= 1) Guards: must be addfunds callback with ?reference= =======
+  const url = location.pathname.toLowerCase() + location.search.toLowerCase();
+  const isAddFunds = /\/addfunds/i.test(url);
+  const hasRef = new URLSearchParams(location.search).has(REF_PARAM);
+
+  // broadened success copy: verified / success / completed / funded
+  const successCopy = /(payment\s*(verified|successful|success|completed)|fund(ing|ed)\s*(successful|success)|deposit\s*(successful|success)|order\s*(created|placed|completed))/i
+    .test(document.body.innerText);
+
+  // bail early if not a legit success page
+  if (!(isAddFunds && hasRef && successCopy)) {
+    log('not success page', { isAddFunds, hasRef, successCopy });
+    return;
   }
 
-  // Check success page
-  const isCallback = /[?&]reference=/.test(location.search);
-  const okCopy = /(payment (successful|completed)|wallet funded|deposit successful|order (created|placed|completed))/i.test(document.body.innerText);
-  const amtMatch = document.body.innerText.match(/(?:₦|NGN|N)\s*[\d,]+(?:\.\d{1,2})?/i);
-  const amount = amtMatch ? parseFloat(amtMatch[0].replace(/[^0-9.]/g,'')) : 0;
-  if(!isCallback || !okCopy || amount <= 0) return;
+  // ======= 2) Amount extraction (robust) =======
+  function parseMoney(txt){
+    if(!txt) return 0;
+    const m = String(txt).match(/(?:₦|NGN|N)\s*[\d,]+(?:\.\d{1,2})?/i);
+    if (!m) return 0;
+    return parseFloat(m[0].replace(/[^0-9.]/g,'')) || 0;
+  }
 
-  // Prevent duplicates
-  const fireKey = 'ogv_purchase_' + (new URLSearchParams(location.search).get('reference') || location.href);
-  try {
-    if (sessionStorage.getItem(fireKey)) return;
-    sessionStorage.setItem(fireKey, '1');
-  } catch(e) {}
+  function findAmount(){
+    // common explicit spots
+    let el = document.querySelector('#payment-amount, #order-amount, .payment-amount, .order-amount, [data-amount], [data-order-total]');
+    if (el){
+      const attr = el.getAttribute('data-amount') || el.getAttribute('data-order-total');
+      const n = attr ? parseFloat(attr) : parseMoney(el.textContent);
+      if (n > 0) return n;
+    }
 
-  // Get stored identifiers if available
-  const email = sessionStorage.getItem('ogv_email') || '';
-  const phone = sessionStorage.getItem('ogv_phone') || '';
+    // tables: look for a row labeled "Amount" or "Total"
+    const rows = Array.from(document.querySelectorAll('tr'));
+    for (const r of rows){
+      const t = (r.innerText||'').toLowerCase();
+      if (/amount|total|value/.test(t)){
+        const cells = r.querySelectorAll('td,th');
+        if (cells.length >= 2){
+          const n = parseMoney(cells[1].innerText);
+          if (n > 0) return n;
+        }
+        const n2 = parseMoney(r.innerText);
+        if (n2 > 0) return n2;
+      }
+    }
 
-  // Send to backend for CAPI
+    // general body scan (last resort)
+    return parseMoney(document.body.innerText);
+  }
+
+  const amount = +findAmount().toFixed(2);
+  if (amount <= 0){
+    log('amount not found, stopping');
+    return;
+  }
+
+  // ======= 3) De-dupe by reference =======
+  const ref = new URLSearchParams(location.search).get(REF_PARAM) || location.href;
+  const fireKey = 'ogv_purchase_' + ref;
+  try { if (sessionStorage.getItem(fireKey)) { log('dupe stop'); return; } sessionStorage.setItem(fireKey,'1'); } catch(_){}
+
+  // identifiers captured earlier (optional)
+  const email = (sessionStorage.getItem('ogv_email')||'').trim().toLowerCase();
+  const phone = (sessionStorage.getItem('ogv_phone')||'');
+
+  const payload = {
+    event_id: 'purchase-'+Date.now()+'-'+Math.random().toString(36).slice(2),
+    amount,
+    currency: 'NGN',
+    email,
+    phone,
+    ua: navigator.userAgent
+  };
+
+  log('sending', payload);
+
   fetch(BACKEND_URL, {
     method: 'POST',
     headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({
-      event_id: 'purchase-'+Date.now()+'-'+Math.random().toString(36).slice(2),
-      amount: +amount.toFixed(2),
-      currency: 'NGN',
-      email: email.trim().toLowerCase(),
-      phone: normPhone(phone),
-      ua: navigator.userAgent
-    })
-  }).then(res => res.json())
-    .then(r => console.log('[OgaViral CAPI]', r))
-    .catch(err => console.error('[OgaViral CAPI Error]', err));
+    body: JSON.stringify(payload)
+  })
+  .then(r => r.json().then(j => ({ok:r.ok, j})))
+  .then(({ok,j}) => log('capi response', ok?'OK':'ERROR', j))
+  .catch(err => log('fetch error', err));
 })();
