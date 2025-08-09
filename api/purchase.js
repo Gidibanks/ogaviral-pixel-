@@ -37,3 +37,45 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Server error', details: String(e) });
   }
 }
+
+
+
+(function(){
+  const BACKEND_URL = 'https://ogaviral-pixel.vercel.app/api/purchase';
+
+  function log(){ try{ console.log.apply(console, ['[OGV purchase.js]'].concat([].slice.call(arguments))); }catch(_){} }
+
+  const isCallback = /[?&]reference=/.test(location.search);
+  const okCopy = /(payment (successful|completed)|wallet funded|deposit successful|order (created|placed|completed))/i.test(document.body.innerText);
+  const amtMatch = document.body.innerText.match(/(?:₦|NGN|N)\s*[\d,]+(?:\.\d{1,2})?/i);
+  const amount = amtMatch ? parseFloat(amtMatch[0].replace(/[^0-9.]/g,'')) : 0;
+
+  log('guards', { isCallback, okCopy, amount });
+
+  if(!isCallback || !okCopy || amount <= 0) return;
+
+  const fireKey = 'ogv_purchase_' + (new URLSearchParams(location.search).get('reference') || location.href);
+  try { if (sessionStorage.getItem(fireKey)) return; sessionStorage.setItem(fireKey, '1'); } catch(e) {}
+
+  const email = (sessionStorage.getItem('ogv_email')||'').trim().toLowerCase();
+  const phone = (sessionStorage.getItem('ogv_phone')||'');
+
+  const payload = {
+    event_id: 'purchase-'+Date.now()+'-'+Math.random().toString(36).slice(2),
+    amount: +amount.toFixed(2),
+    currency: 'NGN',
+    email, phone,
+    ua: navigator.userAgent
+  };
+
+  log('sending', payload);
+
+  fetch(BACKEND_URL, {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify(payload)
+  })
+  .then(r => r.json().then(j => ({ ok: r.ok, j })))
+  .then(({ok, j}) => log('capi response', ok ? 'OK' : 'ERROR', j))
+  .catch(err => log('fetch error', err));
+})();
